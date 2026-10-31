@@ -4,6 +4,73 @@
 
 本範例不是把加法交給模型自行計算，而是讓模型產生 `Add` 函式呼叫，程式實際執行 `Add(25, 17)`，再將結果交回模型產生最後回答。這是建立工具呼叫、資料查詢或其他外部系統整合的基本模式。
 
+## Extension 分支與主線差異
+
+本專案有兩種 Function Calling 實作方式：
+
+| 項目 | Extension 分支 | 主線 |
+|---|---|---|
+| 使用的抽象 | `Microsoft.Extensions.AI.IChatClient` | OpenAI SDK 的 `ResponsesClient` |
+| Function Tool | `AIFunctionFactory.Create(Add)` 自動產生 | `ResponseTool.CreateFunctionTool(...)` 手動建立 JSON Schema |
+| Function Call 處理 | `UseFunctionInvocation()` 自動處理 | 自行解析 `FunctionCallResponseItem` |
+| API 迴圈 | Extension 自動執行函式並回傳結果 | 程式自行維護 `while` 迴圈與輸入項目 |
+| 依賴套件 | `Microsoft.Extensions.AI`、`Microsoft.Extensions.AI.OpenAI` | 僅 `OpenAI` |
+
+### Extension 分支
+
+Extension 分支透過 OpenAI adapter 將 Responses API 轉成通用的 `IChatClient`：
+
+```csharp
+IChatClient client = openai.GetResponsesClient()
+    .AsIChatClient("gpt-4o-mini")
+    .AsBuilder()
+    .UseFunctionInvocation()
+    .Build();
+
+var result = await client.GetResponseAsync(
+    "請使用 Add 函式計算 25 加 17",
+    new ChatOptions
+    {
+        Tools = [AIFunctionFactory.Create(Add)]
+    });
+```
+
+這個版本使用 `Microsoft.Extensions.AI` 的 extension methods：
+
+- `AsIChatClient()`：將 OpenAI `ResponsesClient` 轉成通用的 `IChatClient`。
+- `AsBuilder()`：建立可串接 middleware 的 `ChatClientBuilder`。
+- `UseFunctionInvocation()`：自動處理模型要求、函式執行，以及將函式結果送回模型。
+- `AIFunctionFactory.Create(Add)`：根據 C# 方法建立 Function Tool，包括函式名稱、描述與參數資訊。
+
+因此，應用程式只需要提供 C# 方法與 `ChatOptions.Tools`，不必自行撰寫 Function Call 的解析與多輪呼叫迴圈。這也讓相同的工具註冊方式更容易套用到其他支援 `IChatClient` 的模型供應商。
+
+### 主線
+
+主線不使用 `Microsoft.Extensions.AI`，直接使用 OpenAI SDK：
+
+```csharp
+ResponsesClient client = new(apiKey);
+
+var addTool = ResponseTool.CreateFunctionTool(
+    functionName: nameof(Add),
+    functionDescription: "計算兩個整數的總和",
+    functionParameters: /* 手動提供 JSON Schema */,
+    strictModeEnabled: true);
+
+ResponseResult response = await client.CreateResponseAsync(options);
+```
+
+主線程式必須自行完成以下工作：
+
+1. 用 `ResponseTool.CreateFunctionTool(...)` 描述工具及其 JSON Schema。
+2. 檢查 `response.OutputItems` 是否包含 `FunctionCallResponseItem`。
+3. 解析 `FunctionArguments`，取得 `a` 與 `b`。
+4. 呼叫本機 `Add` 方法。
+5. 建立 `FunctionCallOutputResponseItem`，將結果加入下一輪輸入。
+6. 持續執行 `while` 迴圈，直到模型產生最終回答。
+
+兩種方式使用的 OpenAI Responses API 相同，差別在於抽象層與責任分配：主線讓開發者完整控制每個 API 回合與 JSON Schema；Extension 分支則用 `Microsoft.Extensions.AI` 的通用介面與 middleware 封裝這些重複流程。Extension 分支程式碼較精簡，但若需要自訂每個 Function Call 的解析、錯誤處理或回合控制，主線方式會提供較細緻的控制權。
+
 ## 執行流程
 
 1. 程式建立 `ResponsesClient`。
